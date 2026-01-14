@@ -1,0 +1,55 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: eventhub-postgres
+    environment:
+      POSTGRES_DB: eventhub
+      POSTGRES_USER: eventhub_user
+      POSTGRES_PASSWORD: eventhub_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eventhub_user -d eventhub"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    container_name: eventhub-backend
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: eventhub
+      DB_USER: eventhub_user
+      DB_PASSWORD: eventhub_password
+      JWT_SECRET: your-secret-key-change-in-production
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+    command: npm run dev
+
+  frontend:
+    build: ./frontend
+    container_name: eventhub-frontend
+    ports:
+      - "5174:80"
+    environment:
+      VITE_API_URL: http://localhost:3001
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
