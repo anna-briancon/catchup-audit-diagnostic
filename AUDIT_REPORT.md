@@ -292,7 +292,67 @@ CREATE INDEX idx_events_title_trgm ON events USING gin (title gin_trgm_ops);
 | N+1 participants | COUNT en boucle      | JOIN + GROUP BY              |
 | Recherche lente  | ILIKE non indexable  | Index trigram GIN            |
 
-### 2.5 Métriques Grafana
+### 2.5 Métriques Autocannon (Tests de Charge)
+
+#### Résultats POST /auth/login
+
+![Autocannon - POST /auth/login](./screenshots/autocannon_login.png)
+
+**Analyse :**
+- La latence élevée (~2 secondes) est **cohérente** avec l'utilisation de `bcrypt.compare()` pour vérifier les mots de passe.
+- Le débit de ~8 req/s est **normal** pour une opération de hachage cryptographique.
+- **Pas de problème de performance** : c'est un compromis sécurité/performance acceptable.
+
+---
+
+#### Résultats GET /dashboard/summary
+
+![Autocannon - GET /dashboard/summary](./screenshots/autocannon_dashboard.png)
+
+**Analyse :**
+- **Performance excellente** : latence moyenne de 18 ms confirme que les requêtes SQL sont rapides.
+- Le débit de ~1 100 req/s montre que l'endpoint **scalable bien** sous charge.
+- Les 5 requêtes SQL séquentielles identifiées dans l'audit n'empêchent pas de bonnes performances sur ce dataset (~5k événements).
+- **Point positif** : cet endpoint fonctionne correctement même avec plusieurs requêtes.
+
+---
+
+#### Résultats GET /events
+
+![Autocannon - GET /events](./screenshots/autocannon_events.png)
+
+**Analyse :**
+- **Problème critique confirmé** : latence moyenne de **7.7 secondes** confirme le problème N+1 queries identifié dans l'audit.
+- Le débit de seulement **~2 req/s** montre que l'endpoint ne peut pas gérer la charge.
+- Le volume de **9.1 MB/s** indique que toutes les données sont retournées (pas de pagination).
+- **Corrélation avec l'audit** :
+  - DevTools Network : 795 ms (navigation unique)
+  - Autocannon : 7 683 ms (sous charge avec 20 connexions)
+  - La différence s'explique par la **saturation** : chaque requête déclenche 100+ requêtes SQL (N+1), et sous charge, les requêtes s'accumulent.
+
+**Impact :**
+- **Scalabilité limitée** : avec 20 connexions concurrentes, l'endpoint devient inutilisable.
+- **Risque de timeout** : latence proche de 9 secondes peut dépasser les timeouts HTTP classiques (30s).
+- **Expérience utilisateur dégradée** : attente de plusieurs secondes pour charger la liste.
+
+---
+
+#### Synthèse des Tests Autocannon
+
+| Endpoint | Latence moyenne | Req/s | Statut | Priorité |
+|----------|----------------|-------|--------|----------|
+| **POST /auth/login** | 2 127 ms | ~8 | ✅ Acceptable (bcrypt) | - |
+| **GET /dashboard/summary** | 18 ms | ~1 100 | ✅ Excellent | - |
+| **GET /events** | 7 683 ms | ~2 | 🔴 **Critique** | **P0** |
+
+**Recommandations :**
+1. **Priorité P0** : Optimiser GET /events (N+1 queries + pagination)
+2. **Priorité P1** : Ajouter index PostgreSQL pour améliorer les performances
+3. **Priorité P2** : Optimiser dashboard (fusionner requêtes) pour améliorer encore les performances
+
+---
+
+### 2.6 Métriques Grafana
 
 #### Dashboard global (après navigation et scénarios de test)
 
@@ -337,15 +397,23 @@ Le monitoring confirme donc les conclusions issues de l'analyse SQL et DevTools.
 
 ### 🔗 Corrélation des Mesures
 
-Les mesures issues de **DevTools**, **EXPLAIN ANALYZE** et **Grafana** convergent vers le même goulot d'étranglement :
+Les mesures issues de **DevTools**, **EXPLAIN ANALYZE**, **Autocannon** et **Grafana** convergent vers le même goulot d'étranglement :
 
 | Outil | Métrique | Valeur | Interprétation |
 |-------|----------|--------|----------------|
-| **DevTools Network** | XHR `/events` | 795 ms | Latence API côté client |
+| **DevTools Network** | XHR `/events` | 795 ms | Latence API côté client (navigation unique) |
 | **EXPLAIN ANALYZE** | N+1 queries + Seq Scan | Coût élevé | Goulot base de données |
-| **Grafana** | P95 `/events` | ~2 767 ms | Latence serveur sous charge |
+| **Autocannon** | Latence moyenne `/events` | 7 683 ms | Latence sous charge (20 connexions) |
+| **Autocannon** | Req/s `/events` | ~2 req/s | Débit très faible sous charge |
+| **Grafana** | P95 `/events` | ~2 767 ms | Latence serveur sous charge (fenêtre observée) |
 
-**Conclusion :** La génération de la liste `/events` est le point critique identifié par les trois outils, confirmant un problème de scalabilité au niveau des requêtes SQL (N+1 queries) et de l'absence d'index.
+**Conclusion :** La génération de la liste `/events` est le point critique identifié par **tous les outils**, confirmant un problème de scalabilité au niveau des requêtes SQL (N+1 queries) et de l'absence d'index.
+
+**Analyse comparative :**
+- **DevTools (795 ms)** : mesure en navigation unique, latence déjà élevée
+- **Autocannon (7 683 ms)** : mesure sous charge avec 20 connexions concurrentes, latence **9.6x plus élevée** que la navigation unique
+- **Grafana (2 767 ms)** : mesure P95 sur une fenêtre temporelle, valeur intermédiaire
+- La différence entre DevTools et Autocannon montre l'**effet de saturation** : sous charge, les requêtes N+1 s'accumulent et la latence explose
 
 **Limites :**
 - Mesures réalisées en environnement local (localhost) : latence réseau réelle non représentée.
